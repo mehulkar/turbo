@@ -6,7 +6,7 @@ concurrency:
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "mk/add-to-ci"]
   pull_request:
     types: [opened, edited, synchronize]
 
