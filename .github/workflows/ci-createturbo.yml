@@ -55,5 +55,5 @@ jobs:
           fi
 
       - name: Build & Test
-        run: pnpm -- turbo run test --filter=create-turbo --color
+        run: cd packages/create-turbo && pnpm test
 
