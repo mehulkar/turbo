@@ -1,5 +1,6 @@
 use thiserror::Error;
 use tonic::{Code, Status};
+use tracing::info;
 
 use self::proto::turbod_client::TurbodClient;
 use super::connector::{DaemonConnector, DaemonConnectorError};
@@ -33,7 +34,7 @@ impl<T> DaemonClient<T> {
     /// Stops the daemon and closes the connection, returning
     /// the connection settings that were used to connect.
     pub async fn stop(mut self) -> Result<T, DaemonError> {
-        log::info!("Stopping daemon");
+        info!("Stopping daemon");
         self.client.shutdown(proto::ShutdownRequest {}).await?;
         Ok(self.connect_settings)
     }
@@ -137,15 +138,6 @@ pub enum DaemonError {
     /// There was an issue connecting to the daemon.
     #[error("unable to connect: {0}")]
     DaemonConnect(#[from] DaemonConnectorError),
-    /// The timeout specified was invalid.
-    #[error("invalid timeout specified ({0})")]
-    InvalidTimeout(String),
-    /// The server is unable to start file watching.
-    #[error("unable to start file watching")]
-    FileWatching(#[from] globwatch::Error),
-
-    #[error("unable to display output: {0}")]
-    DisplayError(#[from] serde_json::Error),
 }
 
 impl From<Status> for DaemonError {

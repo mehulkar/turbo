@@ -40,9 +40,6 @@ func ExecuteRun(ctx gocontext.Context, helper *cmdutil.Helper, signalWatcher *si
 	}
 	tasks := executionState.CLIArgs.Command.Run.Tasks
 	passThroughArgs := executionState.CLIArgs.Command.Run.PassThroughArgs
-	if len(tasks) == 0 {
-		return errors.New("at least one task must be specified")
-	}
 	opts, err := optsFromArgs(&executionState.CLIArgs)
 	if err != nil {
 		return err
@@ -50,7 +47,7 @@ func ExecuteRun(ctx gocontext.Context, helper *cmdutil.Helper, signalWatcher *si
 
 	opts.runOpts.PassThroughArgs = passThroughArgs
 	run := configureRun(base, opts, signalWatcher)
-	if err := run.run(ctx, tasks); err != nil {
+	if err := run.run(ctx, tasks, executionState); err != nil {
 		base.LogError("run failed: %v", err)
 		return err
 	}
@@ -129,10 +126,6 @@ func optsFromArgs(args *turbostate.ParsedArgsFromRust) (*Opts, error) {
 }
 
 func configureRun(base *cmdutil.CmdBase, opts *Opts, signalWatcher *signals.Watcher) *run {
-	if os.Getenv("TURBO_FORCE") == "true" {
-		opts.runcacheOpts.SkipReads = true
-	}
-
 	if os.Getenv("TURBO_REMOTE_ONLY") == "true" {
 		opts.cacheOpts.SkipFilesystem = true
 	}
@@ -152,7 +145,7 @@ type run struct {
 	processes *process.Manager
 }
 
-func (r *run) run(ctx gocontext.Context, targets []string) error {
+func (r *run) run(ctx gocontext.Context, targets []string, executionState *turbostate.ExecutionState) error {
 	startAt := time.Now()
 	packageJSONPath := r.base.RepoRoot.UntypedJoin("package.json")
 	rootPackageJSON, err := fs.ReadPackageJSON(packageJSONPath)
@@ -164,9 +157,9 @@ func (r *run) run(ctx gocontext.Context, targets []string) error {
 
 	var pkgDepGraph *context.Context
 	if r.opts.runOpts.SinglePackage {
-		pkgDepGraph, err = context.SinglePackageGraph(r.base.RepoRoot, rootPackageJSON)
+		pkgDepGraph, err = context.SinglePackageGraph(rootPackageJSON, executionState.PackageManager)
 	} else {
-		pkgDepGraph, err = context.BuildPackageGraph(r.base.RepoRoot, rootPackageJSON)
+		pkgDepGraph, err = context.BuildPackageGraph(r.base.RepoRoot, rootPackageJSON, executionState.PackageManager)
 	}
 	if err != nil {
 		var warnings *context.Warnings
@@ -245,7 +238,7 @@ func (r *run) run(ctx gocontext.Context, targets []string) error {
 		}
 	}
 
-	globalHashable, err := calculateGlobalHash(
+	globalHashInputs, err := getGlobalHashInputs(
 		r.base.RepoRoot,
 		rootPackageJSON,
 		pipeline,
@@ -264,7 +257,7 @@ func (r *run) run(ctx gocontext.Context, targets []string) error {
 		return fmt.Errorf("failed to collect global hash inputs: %v", err)
 	}
 
-	if globalHash, err := calculateGlobalHashFromHashable(globalHashable); err == nil {
+	if globalHash, err := calculateGlobalHashFromHashableInputs(globalHashInputs); err == nil {
 		r.base.Logger.Debug("global hash", "value", globalHash)
 		g.GlobalHash = globalHash
 	} else {
@@ -352,8 +345,8 @@ func (r *run) run(ctx gocontext.Context, targets []string) error {
 	}
 
 	var envVarPassthroughMap env.EnvironmentVariableMap
-	if globalHashable.envVarPassthroughs != nil {
-		if envVarPassthroughDetailedMap, err := env.GetHashableEnvVars(globalHashable.envVarPassthroughs, nil, ""); err == nil {
+	if globalHashInputs.envVarPassthroughs != nil {
+		if envVarPassthroughDetailedMap, err := env.GetHashableEnvVars(globalHashInputs.envVarPassthroughs, nil, ""); err == nil {
 			envVarPassthroughMap = envVarPassthroughDetailedMap.BySource.Explicit
 		}
 	}
@@ -376,12 +369,12 @@ func (r *run) run(ctx gocontext.Context, targets []string) error {
 		packagesInScope,
 		globalEnvMode,
 		runsummary.NewGlobalHashSummary(
-			globalHashable.globalFileHashMap,
-			globalHashable.rootExternalDepsHash,
-			globalHashable.envVars,
+			globalHashInputs.globalFileHashMap,
+			globalHashInputs.rootExternalDepsHash,
+			globalHashInputs.envVars,
 			envVarPassthroughMap,
-			globalHashable.globalCacheKey,
-			globalHashable.pipeline,
+			globalHashInputs.globalCacheKey,
+			globalHashInputs.pipeline,
 		),
 		rs.Opts.SynthesizeCommand(rs.Targets),
 	)

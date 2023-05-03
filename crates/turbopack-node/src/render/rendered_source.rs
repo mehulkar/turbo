@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use indexmap::IndexSet;
-use turbo_tasks::{primitives::StringVc, Value};
+use turbo_tasks::{
+    primitives::{JsonValueVc, StringVc},
+    Value,
+};
 use turbo_tasks_env::ProcessEnvVc;
 use turbo_tasks_fs::FileSystemPathVc;
 use turbopack_core::{
@@ -51,6 +54,7 @@ pub fn create_node_rendered_source(
     pathname: StringVc,
     entry: NodeEntryVc,
     fallback_page: DevHtmlAssetVc,
+    render_data: JsonValueVc,
 ) -> ContentSourceVc {
     let source = NodeRenderContentSource {
         cwd,
@@ -61,6 +65,7 @@ pub fn create_node_rendered_source(
         pathname,
         entry,
         fallback_page,
+        render_data,
     }
     .cell();
     ConditionalContentSourceVc::new(
@@ -85,6 +90,7 @@ pub struct NodeRenderContentSource {
     pathname: StringVc,
     entry: NodeEntryVc,
     fallback_page: DevHtmlAssetVc,
+    render_data: JsonValueVc,
 }
 
 #[turbo_tasks::value_impl]
@@ -154,6 +160,7 @@ impl ContentSource for NodeRenderContentSource {
                 specificity: this.specificity,
                 get_content: NodeRenderGetContentResult {
                     source: self_vc,
+                    render_data: this.render_data,
                     path: path.to_string(),
                 }
                 .cell()
@@ -168,6 +175,7 @@ impl ContentSource for NodeRenderContentSource {
 #[turbo_tasks::value]
 struct NodeRenderGetContentResult {
     source: NodeRenderContentSourceVc,
+    render_data: JsonValueVc,
     path: String,
 }
 
@@ -218,13 +226,14 @@ impl GetContentSourceContent for NodeRenderGetContentResult {
                 url: url.clone(),
                 raw_query: raw_query.clone(),
                 raw_headers: raw_headers.clone(),
-                path: format!("/{}", source.pathname.await?),
+                path: source.pathname.await?.clone_value(),
+                data: Some(self.render_data.await?),
             }
             .cell(),
         )
         .issue_context(
             entry.module.ident().path(),
-            format!("server-side rendering /{}", source.pathname.await?),
+            format!("server-side rendering {}", source.pathname.await?),
         )
         .await?;
         Ok(match *result.await? {

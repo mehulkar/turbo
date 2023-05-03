@@ -9,8 +9,9 @@ use anyhow::{anyhow, Result};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use dunce::canonicalize as fs_canonicalize;
-use log::{debug, error};
 use serde::Serialize;
+use tracing::{debug, error};
+use turbopath::AbsoluteSystemPathBuf;
 
 use crate::{
     commands::{bin, daemon, link, login, logout, unlink, CommandBase},
@@ -52,17 +53,12 @@ pub enum DryRunMode {
     Json,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, ValueEnum)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, ValueEnum)]
 pub enum EnvMode {
+    #[default]
     Infer,
     Loose,
     Strict,
-}
-
-impl Default for EnvMode {
-    fn default() -> EnvMode {
-        EnvMode::Infer
-    }
 }
 
 #[derive(Parser, Clone, Default, Debug, PartialEq, Serialize)]
@@ -72,6 +68,7 @@ impl Default for EnvMode {
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     #[clap(long, global = true)]
+    #[serde(skip)]
     pub version: bool,
     #[clap(long, global = true)]
     #[serde(skip)]
@@ -80,6 +77,7 @@ pub struct Args {
     pub skip_infer: bool,
     /// Disable the turbo update notification
     #[clap(long, global = true)]
+    #[serde(skip)]
     pub no_update_notifier: bool,
     /// Override the endpoint for API calls
     #[clap(long, global = true, value_parser)]
@@ -121,12 +119,16 @@ pub struct Args {
     /// verbosity
     #[clap(flatten)]
     pub verbosity: Verbosity,
-    #[clap(long, global = true, hide = true)]
     /// Force a check for a new version of turbo
+    #[clap(long, global = true, hide = true)]
+    #[serde(skip)]
     pub check_for_update: bool,
     #[clap(long = "__test-run", global = true, hide = true)]
     pub test_run: bool,
     #[clap(flatten, next_help_heading = "Run Arguments")]
+    // We don't serialize this because by the time we're calling
+    // Go, we've moved it to the command field as a Command::Run
+    #[serde(skip)]
     pub run_args: Option<RunArgs>,
     #[clap(subcommand)]
     pub command: Option<Command>,
@@ -214,8 +216,8 @@ impl Args {
                 process::exit(0);
             }
         };
-        // --version flag doesn't work with ignore_errors in clap, so we have to handle
-        // it manually
+        // We have to override the --version flag because we use `get_version`
+        // instead of a hard-coded version or the crate version
         if clap_args.version {
             println!("{}", get_version());
             process::exit(0);
@@ -243,9 +245,9 @@ pub enum Command {
     Completion { shell: Shell },
     /// Runs the Turborepo background daemon
     Daemon {
-        /// Set the idle timeout for turbod
-        #[clap(long, default_value_t = String::from("4h0m0s"))]
-        idle_time: String,
+        /// Set the idle timeout for turbod (default 4h0m0s)
+        #[clap(long)]
+        idle_time: Option<String>,
         #[clap(subcommand)]
         #[serde(flatten)]
         command: Option<DaemonCommand>,
@@ -325,8 +327,8 @@ pub struct RunArgs {
     #[clap(short = 'F', long, action = ArgAction::Append)]
     pub filter: Vec<String>,
     /// Ignore the existing cache (to force execution)
-    #[clap(long)]
-    pub force: bool,
+    #[clap(long, env = "TURBO_FORCE", default_missing_value = "true")]
+    pub force: Option<Option<bool>>,
     /// Specify glob of global filesystem dependencies to be hashed. Useful
     /// for .env and files
     #[clap(long = "global-deps", action = ArgAction::Append)]
@@ -488,6 +490,9 @@ pub async fn run(repo_state: Option<RepoState>) -> Result<Payload> {
         current_dir()?
     };
 
+    // a non-absolute repo root is a bug
+    let repo_root = AbsoluteSystemPathBuf::new(repo_root).expect("repo_root is not absolute");
+
     let version = get_version();
 
     match cli_args.command.as_ref().unwrap() {
@@ -552,20 +557,28 @@ pub async fn run(repo_state: Option<RepoState>) -> Result<Payload> {
 
             Ok(Payload::Rust(Ok(0)))
         }
-        Command::Daemon { command, idle_time } => {
-            let base = CommandBase::new(cli_args.clone(), repo_root, version)?;
-
-            match command {
-                Some(command) => daemon::daemon_client(command, &base).await,
-                None => daemon::daemon_server(&base, idle_time).await,
-            }?;
-
+        Command::Daemon {
+            command: Some(command),
+            ..
+        } => {
+            let command = *command;
+            let base = CommandBase::new(cli_args, repo_root, version)?;
+            daemon::main(&command, &base).await?;
             Ok(Payload::Rust(Ok(0)))
-        }
-        Command::Prune { .. } | Command::Run(_) => {
+        },
+        Command::Run(args) => {
+            if args.tasks.is_empty() {
+                return Err(anyhow!("at least one task must be specified"));
+            }
             let base = CommandBase::new(cli_args, repo_root, version)?;
             Ok(Payload::Go(Box::new(base)))
         }
+        Command::Prune { .. }
+        // the daemon itself still delegates to Go
+        | Command::Daemon { .. } => {
+            let base = CommandBase::new(cli_args, repo_root, version)?;
+            Ok(Payload::Go(Box::new(base)))
+        },
         Command::Completion { shell } => {
             generate(*shell, &mut Args::command(), "turbo", &mut io::stdout());
 
@@ -876,7 +889,7 @@ mod test {
             Args {
                 command: Some(Command::Run(Box::new(RunArgs {
                     tasks: vec!["build".to_string()],
-                    force: true,
+                    force: Some(Some(true)),
                     ..get_default_run_args()
                 }))),
                 ..Args::default()

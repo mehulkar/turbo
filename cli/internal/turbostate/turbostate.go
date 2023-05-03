@@ -63,8 +63,9 @@ type RunPayload struct {
 // Command consists of the data necessary to run a command.
 // Only one of these fields should be initialized at a time.
 type Command struct {
-	Prune *PrunePayload `json:"prune"`
-	Run   *RunPayload   `json:"run"`
+	Daemon *DaemonPayload `json:"daemon"`
+	Prune  *PrunePayload  `json:"prune"`
+	Run    *RunPayload    `json:"run"`
 }
 
 // ParsedArgsFromRust are the parsed command line arguments passed
@@ -89,7 +90,8 @@ type ParsedArgsFromRust struct {
 
 // ExecutionState is the entire state of a turbo execution that is passed from the Rust shim.
 type ExecutionState struct {
-	APIClientConfig APIClientConfig    `json:"remote_config"`
+	APIClientConfig APIClientConfig    `json:"api_client_config"`
+	PackageManager  string             `json:"package_manager"`
 	CLIArgs         ParsedArgsFromRust `json:"cli_args"`
 }
 
