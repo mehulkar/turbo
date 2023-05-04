@@ -290,16 +290,13 @@ jobs:
           mv rust-artifacts/turbo-x86_64-pc-windows-gnu cli/dist-windows-amd64
 
       - name: Download Go artifacts
-        uses: dawidd6/action-download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
-          github_token: ${{secrets.TURBOBOT}}
-          workflow: turborepo-release-step-2.yml
-          workflow_conclusion: success
-          branch: ${{ env.STAGE_BRANCH }}
           path: go-artifacts
 
       - name: Move Go artifacts into place
         run: |
+          ls go-artifacts
           mv go-artifacts/turbo-go-cross-${{ env.STAGE_BRANCH }}/turbo_linux_amd64_v1/bin/* cli/dist-linux-amd64
           chmod a+x cli/dist-linux-amd64/turbo
           chmod a+x cli/dist-linux-amd64/go-turbo
