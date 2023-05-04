@@ -3,16 +3,13 @@ package runsummary
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/mitchellh/cli"
 	"github.com/segmentio/ksuid"
 	"github.com/vercel/turbo/cli/internal/client"
-	"github.com/vercel/turbo/cli/internal/spinner"
 	"github.com/vercel/turbo/cli/internal/turbopath"
 	"github.com/vercel/turbo/cli/internal/util"
 	"github.com/vercel/turbo/cli/internal/workspace"
@@ -49,9 +46,10 @@ type Meta struct {
 	singlePackage      bool
 	shouldSave         bool
 	apiClient          *client.APIClient
-	spaceID            string
 	runType            runType
 	synthesizedCommand string
+	spaceID            string // This is global to the repo
+	spaceRun           *spaceRun
 }
 
 // RunSummary contains a summary of what happens in the `turbo run` command and why.
@@ -96,7 +94,7 @@ func NewRunSummary(
 
 	executionSummary := newExecutionSummary(synthesizedCommand, repoPath, startAt, profile)
 
-	return Meta{
+	meta := Meta{
 		RunSummary: &RunSummary{
 			ID:                ksuid.New(),
 			Version:           runSummarySchemaVersion,
@@ -117,6 +115,18 @@ func NewRunSummary(
 		spaceID:            spaceID,
 		synthesizedCommand: synthesizedCommand,
 	}
+
+	// Bidirectional reference
+	meta.spaceRun = &spaceRun{
+		apiClient: apiClient,
+		ui:        ui,
+	}
+	// swallowing the error here, what should we do instead?
+	if err := meta.spaceRun.start(); err != nil {
+		fmt.Printf("%v", err) // TODO: use a logger
+	}
+
+	return meta
 }
 
 // getPath returns a path to where the runSummary is written.
@@ -125,6 +135,10 @@ func NewRunSummary(
 func (rsm *Meta) getPath() turbopath.AbsoluteSystemPath {
 	filename := fmt.Sprintf("%s.json", rsm.RunSummary.ID)
 	return rsm.repoRoot.UntypedJoin(filepath.Join(".turbo", "runs"), filename)
+}
+
+func (rsm *Meta) CloseTask(task *TaskSummary) error {
+	return rsm.spaceRun.postTask(rsm.spaceID, task)
 }
 
 // Close wraps up the RunSummary at the end of a `turbo run`.
@@ -160,37 +174,11 @@ func (rsm *Meta) Close(ctx context.Context, exitCode int, workspaceInfos workspa
 		return nil
 	}
 
-	return rsm.sendToSpace(ctx)
-}
+	// TODO: handle errors
+	rsm.spaceRun.done(rsm)
 
-func (rsm *Meta) sendToSpace(ctx context.Context) error {
-	if !rsm.apiClient.IsLinked() {
-		rsm.ui.Warn("Failed to post to space because repo is not linked to a Space. Run `turbo link` first.")
-		return nil
-	}
-
-	// Wrap the record function so we can hoist out url/errors but keep
-	// the function signature/type the spinner.WaitFor expects.
-	var url string
-	var errs []error
-	record := func() {
-		url, errs = rsm.record()
-	}
-
-	func() {
-		_ = spinner.WaitFor(ctx, record, rsm.ui, "...sending run summary...", 1000*time.Millisecond)
-	}()
-
-	// After the spinner is done, print any errors and the url
-	if len(errs) > 0 {
-		rsm.ui.Warn("Errors recording run to Spaces")
-		for _, err := range errs {
-			rsm.ui.Warn(fmt.Sprintf("%v", err))
-		}
-	}
-
-	if url != "" {
-		rsm.ui.Output(fmt.Sprintf("Run: %s", url))
+	if rsm.spaceRun.url != "" {
+		rsm.ui.Output(fmt.Sprintf("Run: %s", rsm.spaceRun.url))
 		rsm.ui.Output("")
 	}
 
@@ -239,88 +227,6 @@ func (rsm *Meta) save() error {
 }
 
 // record sends the summary to the API
-func (rsm *Meta) record() (string, []error) {
-	errs := []error{}
-
-	// Right now we'll send the POST to create the Run and the subsequent task payloads
-	// after all execution is done, but in the future, this first POST request
-	// can happen when the Run actually starts, so we can send updates to the associated Space
-	// as tasks complete.
-	createRunEndpoint := fmt.Sprintf(runsEndpoint, rsm.spaceID)
-	response := &spacesRunResponse{}
-
-	payload := rsm.newSpacesRunCreatePayload()
-	if startPayload, err := json.Marshal(payload); err == nil {
-		if resp, err := rsm.apiClient.JSONPost(createRunEndpoint, startPayload); err != nil {
-			errs = append(errs, fmt.Errorf("POST %s: %w", createRunEndpoint, err))
-		} else {
-			if err := json.Unmarshal(resp, response); err != nil {
-				errs = append(errs, fmt.Errorf("Error unmarshaling response: %w", err))
-			}
-		}
-	}
-
-	if response.ID != "" {
-		if taskErrs := rsm.postTaskSummaries(response.ID); len(taskErrs) > 0 {
-			errs = append(errs, taskErrs...)
-		}
-
-		if donePayload, err := json.Marshal(newSpacesDonePayload(rsm.RunSummary)); err == nil {
-			patchURL := fmt.Sprintf(runsPatchEndpoint, rsm.spaceID, response.ID)
-			if _, err := rsm.apiClient.JSONPatch(patchURL, donePayload); err != nil {
-				errs = append(errs, fmt.Errorf("PATCH %s: %w", patchURL, err))
-			}
-		}
-	}
-
-	if len(errs) > 0 {
-		return response.URL, errs
-	}
-
-	return response.URL, nil
-}
-
-func (rsm *Meta) postTaskSummaries(runID string) []error {
-	errs := []error{}
-	// We make at most 8 requests at a time.
-	maxParallelRequests := 8
-	taskSummaries := rsm.RunSummary.Tasks
-	taskCount := len(taskSummaries)
-	taskURL := fmt.Sprintf(tasksEndpoint, rsm.spaceID, runID)
-
-	parallelRequestCount := maxParallelRequests
-	if taskCount < maxParallelRequests {
-		parallelRequestCount = taskCount
-	}
-
-	queue := make(chan int, taskCount)
-
-	wg := &sync.WaitGroup{}
-	for i := 0; i < parallelRequestCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range queue {
-				task := taskSummaries[index]
-				payload := newSpacesTaskPayload(task)
-				if taskPayload, err := json.Marshal(payload); err == nil {
-					if _, err := rsm.apiClient.JSONPost(taskURL, taskPayload); err != nil {
-						errs = append(errs, fmt.Errorf("Error sending %s summary to space: %w", task.TaskID, err))
-					}
-				}
-			}
-		}()
-	}
-
-	for index := range taskSummaries {
-		queue <- index
-	}
-	close(queue)
-	wg.Wait()
-
-	if len(errs) > 0 {
-		return errs
-	}
-
-	return nil
+func (rsm *Meta) record() error {
+	return rsm.spaceRun.done()
 }

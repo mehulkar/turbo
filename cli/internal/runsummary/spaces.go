@@ -1,13 +1,102 @@
 package runsummary
 
 import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/mitchellh/cli"
 	"github.com/vercel/turbo/cli/internal/ci"
+	"github.com/vercel/turbo/cli/internal/client"
 )
 
-// spacesRunResponse deserialized the response from POST Run endpoint
-type spacesRunResponse struct {
-	ID  string
-	URL string
+type spaceRun struct {
+	// rsm       *Meta
+	apiClient *client.APIClient
+	ui        cli.Ui
+	id        string
+	url       string
+}
+
+func (sr *spaceRun) start(rsm *Meta) error {
+	if !sr.apiClient.IsLinked() {
+		sr.ui.Warn("Failed to post to space because repo is not linked to a Space. Run `turbo link` first.")
+		return nil
+	}
+
+	// rsm := sr.rsm
+	createRunEndpoint := fmt.Sprintf(runsEndpoint, rsm.spaceID)
+	payload := newSpacesRunCreatePayload(rsm)
+	data, err := json.Marshal(payload)
+	if err == nil {
+		return fmt.Errorf("Failed to create payload: %v", err)
+	}
+
+	resp, err := sr.apiClient.JSONPost(createRunEndpoint, data)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", createRunEndpoint, err)
+	}
+
+	// deserialize the response into an anonymous struct, because we want two very simple things from it
+	response := &struct {
+		ID  string
+		URL string
+	}{}
+	if err := json.Unmarshal(resp, response); err != nil {
+		return fmt.Errorf("Error unmarshaling response: %w", err)
+	}
+
+	sr.id = response.ID
+	sr.url = response.URL
+
+	return nil
+}
+
+func (sr *spaceRun) done(rsm *Meta) error {
+	if !sr.apiClient.IsLinked() {
+		sr.ui.Warn("Failed to post to space because repo is not linked to a Space. Run `turbo link` first.")
+		return nil
+	}
+
+	if rsm.spaceID == "" {
+		return fmt.Errorf("No Run ID found to PATCH")
+	}
+
+	data, err := json.Marshal(newSpacesDonePayload(rsm.RunSummary))
+	if err != nil {
+		return fmt.Errorf("Failed to marshal data for done payload")
+	}
+
+	url := fmt.Sprintf(runsPatchEndpoint, rsm.spaceID, sr.id)
+	if _, err := rsm.apiClient.JSONPatch(url, data); err != nil {
+		return fmt.Errorf("PATCH %s: %w", url, err)
+	}
+
+	return nil
+}
+
+func (sr *spaceRun) postTask(spaceID string, task *TaskSummary) error {
+	if !sr.apiClient.IsLinked() {
+		sr.ui.Warn("Failed to post to space because repo is not linked to a Space. Run `turbo link` first.")
+		return nil
+	}
+
+	payload := newSpacesTaskPayload(task)
+	// TODO, figure out how to ensure that start() request was done at this point
+	if sr.id == "" {
+		return fmt.Errorf("No Run ID found to post tasks")
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal data for task")
+	}
+
+	url := fmt.Sprintf(tasksEndpoint, spaceID, sr.id)
+	if _, err := sr.apiClient.JSONPost(url, data); err != nil {
+		return fmt.Errorf("Failed to send %s summary to space: %w", task.TaskID, err)
+	}
+
+	return nil
 }
 
 type spacesClientSummary struct {
@@ -58,7 +147,7 @@ type spacesTask struct {
 	Logs         string            `json:"log"`
 }
 
-func (rsm *Meta) newSpacesRunCreatePayload() *spacesRunPayload {
+func newSpacesRunCreatePayload(rsm *Meta) *spacesRunPayload {
 	startTime := rsm.RunSummary.ExecutionSummary.startedAt.UnixMilli()
 	context := "LOCAL"
 	if name := ci.Constant(); name != "" {
