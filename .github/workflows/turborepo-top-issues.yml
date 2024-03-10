@@ -19,4 +19,4 @@ jobs:
         run: node ./.github/actions/top-issues/index.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+          SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
