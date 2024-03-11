@@ -2,37 +2,27 @@
 import { context, getOctokit } from "@actions/github";
 import { setFailed, info } from "@actions/core";
 import { WebClient } from "@slack/web-api";
+import fs from "node:fs";
+
+const dirToWriteSlackPayloadIn = process.argv[2];
+
+console.log("dirToWriteSlackPayloadIn: ", dirToWriteSlackPayloadIn);
+const fileToWriteSlackPayloadIn = `${dirToWriteSlackPayloadIn}/slack-payload.json`;
 
 function generateBlocks(issues) {
-  const blocks = [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: "*A list of the top 15 issues sorted by most :+1: reactions over the last 90 days.*\n_Note: This :github2: workflow will run every Monday at 1PM UTC (9AM EST)._",
-      },
-    },
-    {
-      type: "divider",
-    },
+  const lines = [
+    "*A list of the top 15 issues sorted by most :+1: reactions over the last 90 days.*\n_Note: This :github2: workflow will run every Monday at 1PM UTC (9AM EST)._",
   ];
 
-  let text = "";
   issues.forEach((issue, i) => {
-    text += `${i + 1}. [<${issue.html_url}|#${issue.number}>, :+1: ${
+    const line = `${i + 1}. [<${issue.html_url}|#${issue.number}>, :+1: ${
       issue.reactions["+1"]
-    }]: ${issue.title}\n`;
+    }]: ${issue.title}`;
+
+    lines.push(line);
   });
 
-  blocks.push({
-    type: "section",
-    text: {
-      type: "mrkdwn",
-      text: text,
-    },
-  });
-
-  return blocks;
+  return lines.join("\n");
 }
 
 async function run() {
@@ -56,20 +46,13 @@ async function run() {
       sort: "reactions-+1",
     });
 
-    console.log(data.items);
+    console.log("Found issues: ", data.items.length);
 
-    if (data.items.length > 0) {
-      await slackClient.chat.postMessage({
-        blocks: generateBlocks(data.items),
-        channel: "#turbo",
-        icon_emoji: ":github:",
-        username: "GitHub Notifier",
-      });
-
-      info(`Posted to Slack!`);
-    } else {
-      info(`No popular issues`);
-    }
+    const text = generateBlocks(data.items);
+    fs.writeFileSync(
+      fileToWriteSlackPayloadIn,
+      JSON.stringify({ text }, null, 2)
+    );
   } catch (error) {
     setFailed(error);
   }
