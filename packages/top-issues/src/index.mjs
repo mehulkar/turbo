@@ -1,10 +1,13 @@
 // @ts-check
 import { context, getOctokit } from "@actions/github";
 import { setFailed, info } from "@actions/core";
-import { WebClient } from "@slack/web-api";
 import fs from "node:fs";
 
 const dirToWriteSlackPayloadIn = process.argv[2];
+
+if (!dirToWriteSlackPayloadIn) {
+  throw new Error("Pass a directory to write the slack payload in");
+}
 
 console.log("dirToWriteSlackPayloadIn: ", dirToWriteSlackPayloadIn);
 const fileToWriteSlackPayloadIn = `${dirToWriteSlackPayloadIn}/slack-payload.json`;
@@ -31,7 +34,6 @@ async function run() {
     if (!process.env.SLACK_TOKEN) throw new TypeError("SLACK_TOKEN not set");
 
     const octoClient = getOctokit(process.env.GITHUB_TOKEN);
-    const slackClient = new WebClient(process.env.SLACK_TOKEN);
 
     // Get the date 90 days ago (YYYY-MM-DD)
     const date = new Date();
